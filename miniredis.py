@@ -11,11 +11,50 @@ from collections import namedtuple
 from io import BytesIO
 from socket import error as socket_error
 import re
+import logging
+import optparse
+
+#logging.basicConfig(level=logging.DEBUG,
+#    format="%(asctime)s %(name)s:%(levelname)s:%(message)s", 
+#    datefmt="%d-%M-%Y %H:%M:%S")
+
+logger = logging.getLogger(__name__)
+
+
+def configure_logger(options):
+    logger.addHandler(logging.StreamHandler())
+    if options.log_file:
+        logger.addHandler(logging.FileHandler(options.log_file))
+    elif options.debug:
+        logger.setLevel(logging.DEBUG)
+    elif options.error:
+        logger.setLevel(logging.ERROR)
+    else:
+        logger.setLevel(logging.INFO)
+
+
+def get_option_parser():
+    parser = optparse.OptionParser()
+    parser.add_option('-d', '--debug', action='store_true', dest='debug', 
+                        help='Log debug messages.')
+    parser.add_option('-e', '--errors', action='store_true', dest='error',
+                        help='Log error messages only.')
+    parser.add_option('-l', '--log-file', dest='log_file', help='Log file.')
+    parser.add_option('-H', '--host', default='127.0.0.1', dest='host',
+                        help='Host to listen on.')
+    parser.add_option('-p', '--port', default=31337, dest='port',
+                        help='Port to listen on.', type=int)
+    parser.add_option('-m', '--max-clients', default=1024, dest='max_clients',
+                        help='Maximum number of clients.', type=int)
+    return parser
+
+
+Error = namedtuple('Error', ('message',))      
+
 
 class CommandError(Exception): pass
 class Disconnect(Exception): pass
 
-Error = namedtuple('Error', ('message',))      
 
 class ProtocolHandler(object):
     def __init__(self):
@@ -38,7 +77,7 @@ class ProtocolHandler(object):
             return self.handlers[first_byte](socket_file)
         except KeyError:
             raise CommandError('bad request')
-        
+
     def handle_simple_string(self, socket_file):
         return socket_file.readline().rstrip('\r\n')    
 
@@ -113,6 +152,8 @@ class Server(object):
 
 
     def connection_handler(self, conn, addr):
+        logger.info('Connection received: %s:%s' % addr)
+
         # Convert "conn" (a socket object) into a file-like object.
         socket_file = conn.makefile('rwb')
 
@@ -121,11 +162,13 @@ class Server(object):
             try:
                 data = self._protocol.handle_request(socket_file)
             except Disconnect:
+                logger.info('Client went away: %s:%s' % addr)
                 break
 
             try:
                 resp = self.get_response(data)
             except CommandError as e:
+                logger.debug('Command error')
                 resp = Error(exc.args[0])
 
             self._protocol.write_response(socket_file, resp)
@@ -156,6 +199,8 @@ class Server(object):
         command = data[0].upper()
         if command not in self._commands:
             raise CommandError('Unrecognized command: %s' % command)
+        else:
+            logger.debug('Received %s', command)
 
         return self._commands[command](*data[1:])
 
@@ -232,8 +277,12 @@ class Client(object):
     def keys(self, pattern='*'):
         return self.execute('KEYS', pattern)
 
+    
 
 if __name__ == '__main__':
     from gevent import monkey; monkey.patch_all()
-    Server().run()
+    options, args = get_option_parser().parse_args()
+    configure_logger(options)
+    server = Server(options.host, options.port, options.max_clients)
+    server.run()
 
